@@ -1,7 +1,5 @@
 import httpx
-from fastapi import HTTPException
-import asyncio 
-
+from app.reliability import retry_request
 
 class GeminiProvider():
     def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
@@ -33,12 +31,16 @@ class GeminiProvider():
     async def chat(self, payload: dict) -> dict:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
         headers={"x-goog-api-key": self.api_key}
-            
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            gemini_body = self._to_gemini(payload)
-            resp = await client.post(url, headers=headers, json=gemini_body)
-            data = resp.json()
-            return self._to_openai(data)
+        gemini_body = self._to_gemini(payload)
+
+        async def do_request():
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(url, headers=headers, json=gemini_body)
+                resp.raise_for_status()              # чтоб обёртка ловила 4xx/5xx
+                data = resp.json()
+                return self._to_openai(data)
+
+        return await retry_request(do_request)
 
     def _to_openai(self, data: dict) -> dict:
         text = data["candidates"][0]["content"]["parts"][0]["text"]
