@@ -15,6 +15,22 @@ class Router:
             try:
                 return await provider.chat(payload)
             except Exception as e:
-                last_error = e        
+                last_error = e
         raise HTTPException(status_code=503, detail="all providers failed")
-            
+
+    async def chat_stream(self, payload: dict):
+            last_error = None
+            for provider in self.providers:
+                try:
+                    stream = provider.chat_stream(payload)   # генератор создан, но не запущен
+                    first = await anext(stream)               # ← тут провайдер реально дёргается
+                except Exception as e:
+                    print(f"[router stream] provider {provider} failed: {e!r}")
+                    last_error = e
+                    continue                                  # не завёлся — следующий
+                yield first                                   # завёлся: отдаём первый кусок, потом остальное
+                async for chunk in stream:
+                    yield chunk
+                return                                        # поток дошёл до конца — выходим
+            error_chunk = f'data: {{"error": "all providers failed"}}\n\n'  # все провайдеры сдохли — отдаём ошибку куском (raise тут нельзя, поток уже начат)
+            yield error_chunk.encode("utf-8")

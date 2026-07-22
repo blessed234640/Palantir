@@ -18,5 +18,5 @@ router = Router(providers=[provider, gemini])
 async def chat_completions(request: ChatCompletionRequest):
     payload = request.model_dump()
     if request.stream:
-        return StreamingResponse(provider.chat_stream(payload), media_type="text/event-stream")
+        return StreamingResponse(router.chat_stream(payload), media_type="text/event-stream")
     return await router.chat(payload)
