@@ -5,8 +5,8 @@ endpoint and routes requests across multiple model backends — a local model se
 [Ollama](https://ollama.com) and the Google Gemini API — handling format translation,
 streaming, retries, and automatic failover between providers.
 
-> **Status: work in progress.** Phase 1 (core gateway) is complete; Phase 2 (reliability)
-> is largely done. See the roadmap below.
+> **Status: work in progress.** Phases 1 (core gateway) and 2 (reliability) are complete.
+> See the roadmap below.
 
 ## Why
 
@@ -22,36 +22,41 @@ explicit rather than hidden behind an abstraction.
 
 ## Features
 
-**Core gateway (Phase 1)**
+**Core gateway**
 
 - **OpenAI-compatible API** — a drop-in `/v1/chat/completions` endpoint; any client written
   against the OpenAI SDK can point at the gateway without changes.
 - **Async request forwarding** — non-blocking I/O with `httpx`, so a single process keeps
   serving other requests while a model generates.
 - **Provider abstraction** — each backend lives behind a provider class exposing the same
-  interface. The endpoint calls `chat()` without knowing which backend answers.
-- **Streaming (SSE)** — with `stream: true`, tokens are relayed to the client as they are
-  generated, chunk by chunk, with no server-side buffering.
-- **Upstream error handling** — distinguishes "backend returned an error" from "backend
-  unreachable" and returns a clear response instead of a stack trace.
+  interface. The endpoint never knows which backend answers.
+- **Streaming (SSE)** — with `stream: true`, tokens are relayed as they are generated, with
+  no server-side buffering, terminated by the standard `[DONE]` marker.
 
-**Reliability & multi-provider (Phase 2)**
+**Multi-provider & reliability**
 
-- **Multiple backends behind one format** — a local model via Ollama and Google Gemini,
-  both reachable through the same OpenAI-shaped request and response.
-- **Bidirectional format translation** — Gemini speaks its own dialect
-  (`contents`/`parts`, `model` instead of `assistant`, system prompts as a separate field).
-  The provider translates requests into it and translates responses back, so clients always
-  see one consistent format regardless of which backend answered.
+- **Bidirectional format translation** — Gemini speaks its own dialect (`contents`/`parts`,
+  `model` instead of `assistant`, system prompts as a separate field). The provider
+  translates requests into it and translates responses back — including **chunk-by-chunk
+  translation during streaming**, so clients see one consistent format regardless of which
+  backend answered.
 - **Retries with exponential backoff** — transient failures are retried with a growing
-  delay. Client-side errors (`4xx`) are not retried, since repeating a malformed request
-  cannot succeed; server-side errors (`5xx`) and connection failures are.
+  delay. Client errors (`4xx`) are not retried, since repeating a malformed request cannot
+  succeed; server errors (`5xx`) and connection failures are.
 - **Shared reliability layer** — retry policy lives in one place and is applied to any
   provider by composition (a higher-order wrapper around the network call), rather than
   duplicated per provider or baked into a base class.
-- **Provider failover** — a router walks a prioritized list of providers: the first one to
-  answer wins, and if it fails the request is retried against the next. The client receives
-  a normal response and never sees that the primary was down.
+- **Model-aware routing** — providers declare which models they serve, and the router tries
+  matching providers first, falling back to the rest.
+- **Failover with transparency** — if the requested model's provider is down or the model
+  doesn't exist, another provider answers using its own default model, and the response
+  carries a `fallback_from` field naming what was originally requested. Availability is
+  preserved without silently substituting a model behind the client's back.
+- **Streaming failover** — the same failover applies to streamed requests, resolved before
+  the first chunk reaches the client. Once bytes are in flight an HTTP error can no longer
+  be returned, so a total failure is reported as a terminal SSE chunk instead.
+- **Defensive response parsing** — malformed or empty upstream responses produce a clear
+  `502` rather than an unhandled exception.
 
 ## Tech stack
 
@@ -60,17 +65,17 @@ Python · FastAPI · httpx · Pydantic v2 · Uvicorn · Ollama · Google Gemini 
 ## Architecture
 
 client ──▶ FastAPI ──▶ Router ──▶ retry wrapper ──▶ Provider ──▶ backend
-endpoint (failover) (backoff) (translation)
-(validation) │ ├─▶ Ollama (local model)
+endpoint (ordering, (backoff) (translation)
+(validation) failover) ├─▶ Ollama (local model)
 │ └─▶ Gemini API
 └─ tries next provider on failure
 
 
-Requests are validated by Pydantic schemas. The endpoint delegates to a router, which walks
-its provider list in priority order. Each provider knows only how to talk to its own
-backend — building the request, calling it, and translating the response into the common
-format. The retry policy wraps that call from the outside, so reliability behavior is
-defined once and shared.
+Requests are validated by Pydantic schemas. The endpoint delegates to a router, which
+orders providers by whether they serve the requested model and walks that list until one
+succeeds. Each provider knows only how to talk to its own backend — building the request,
+calling it, and translating the response into the common format. The retry policy wraps
+that call from the outside, so reliability behavior is defined once and shared.
 
 ## Getting started
 
@@ -105,7 +110,7 @@ The gateway starts on `http://localhost:8000`. Interactive API docs at
 
 ### Try it
 
-Non-streaming:
+Local model:
 
 ```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
@@ -113,30 +118,36 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   -d '{"model":"phi4-mini","messages":[{"role":"user","content":"hello"}]}'
 ```
 
+Cloud model — same endpoint, same request shape:
+
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"hello"}]}'
+```
+
 Streaming:
 
 ```bash
 curl -N -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"phi4-mini","messages":[{"role":"user","content":"tell me a short story"}],"stream":true}'
+  -d '{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"tell me a short story"}],"stream":true}'
 ```
 
-Failover — stop Ollama and repeat the first request. The response still returns `200`, this
-time answered by Gemini.
+Failover — stop Ollama and repeat the first request. The response still returns `200`,
+answered by Gemini, with `"fallback_from": "phi4-mini"` marking the substitution.
 
 ## Roadmap
 
 - [x] **Phase 1 — Core gateway:** OpenAI-compatible endpoint, provider abstraction,
   upstream error handling, SSE streaming
-- [ ] **Phase 2 — Reliability**
-  - [x] Retries with exponential backoff
-  - [x] Second provider (Gemini) with bidirectional format translation
-  - [x] Provider failover via router
-  - [x] Shared reliability layer (retry policy applied by composition)
-  - [ ] Failover for streaming requests
-  - [ ] Model-aware routing (pick the provider that serves the requested model)
-  - [ ] Circuit breaker, rate limiting
-- [ ] **Phase 3 — Caching:** exact-match cache, then semantic cache (pgvector + local embeddings)
+- [x] **Phase 2 — Reliability:** retries with backoff, second provider with format
+  translation, provider failover (including streaming), shared reliability layer,
+  model-aware routing
+- [ ] **Phase 3 — Caching:** exact-match cache, then semantic cache (pgvector + local
+  embeddings)
 - [ ] **Phase 4 — Observability:** request tracing, token/cost accounting, dashboard
-- [ ] **Phase 5 — Prompt management & evals:** versioned prompts, replay, LLM-as-judge regression tests
-- [ ] **Phase 6 — Durable agent runtime:** event-sourced, idempotent, resumable agent execution
+- [ ] **Phase 5 — Prompt management & evals:** versioned prompts, replay, LLM-as-judge
+  regression tests
+- [ ] **Phase 6 — Durable agent runtime:** event-sourced, idempotent, resumable agent
+  execution
