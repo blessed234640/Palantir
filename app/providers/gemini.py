@@ -96,3 +96,6 @@ class GeminiProvider():
                 "total_tokens": total_tokens,
             },
         }
+
+    def supports_model(self, model: str) -> bool:
+        return model.startswith("gemini")

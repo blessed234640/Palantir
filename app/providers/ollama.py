@@ -26,3 +26,7 @@ class OllamaProvider():
                 return resp.json()
 
         return await retry_request(do_request)       # обёртка гоняет его с ретраями
+
+    
+    def supports_model(self, model: str) -> bool:
+        return not model.startswith("gemini")

@@ -11,21 +11,33 @@ class Router:
 
     async def chat(self, payload: dict) -> dict:
         last_error = None
-        for provider in self.providers:
+        model = payload.get("model", "")
+        preferred = [p for p in self.providers if p.supports_model(model)]
+        others = [p for p in self.providers if not p.supports_model(model)]
+        candidates = preferred + others
+        for provider in candidates:
             try:
-                return await provider.chat(payload)
+                result = await provider.chat(payload)
+                if preferred and provider not in preferred:
+                    print(f"[router] fallback: requested {model}, answered by {provider}")
+                    result["fallback_from"] = model
+                return result
             except Exception as e:
                 last_error = e
         raise HTTPException(status_code=503, detail="all providers failed")
 
     async def chat_stream(self, payload: dict):
             last_error = None
-            for provider in self.providers:
+            model = payload.get("model", "")
+            preferred = [p for p in self.providers if p.supports_model(model)]
+            others = [p for p in self.providers if not p.supports_model(model)]
+            candidates = preferred + others
+
+            for provider in candidates:
                 try:
                     stream = provider.chat_stream(payload)   # генератор создан, но не запущен
                     first = await anext(stream)               # ← тут провайдер реально дёргается
                 except Exception as e:
-                    print(f"[router stream] provider {provider} failed: {e!r}")
                     last_error = e
                     continue                                  # не завёлся — следующий
                 yield first                                   # завёлся: отдаём первый кусок, потом остальное
