@@ -2,9 +2,10 @@ import hashlib, json, time
 
 
 class InMemoryCache:
-    def __init__(self, ttl_seconds: int = 3600):
-        self._store = {}                    # ключ → (ответ, время записи)
+    def __init__(self, ttl_seconds: int = 1800, fallback_ttl_seconds: int = 300):
+        self._store = {}                    # ключ → (ответ, время записи, ttl)
         self.ttl = ttl_seconds
+        self.fallback_ttl = fallback_ttl_seconds
 
     def _make_key(self, payload: dict) -> str:
 
@@ -17,12 +18,13 @@ class InMemoryCache:
         key = self._make_key(payload)
         if key not in self._store:
             return None
-        response, ts = self._store[key]
-        if time.time() - ts > self.ttl:
+        response, ts, ttl = self._store[key]
+        if time.time() - ts > ttl:
             del self._store[key]
             return None
         return response
 
     def set(self, payload: dict, response: dict) -> None:
         key = self._make_key(payload)
-        self._store[key] = (response, time.time())
+        ttl = self.fallback_ttl if "fallback_from" in response else self.ttl
+        self._store[key] = (response, time.time(), ttl)

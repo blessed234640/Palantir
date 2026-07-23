@@ -12,7 +12,7 @@ app = FastAPI(title="шлюз")
 provider = OllamaProvider(base_url="http://localhost:11434")
 gemini = GeminiProvider(api_key=settings.gemini_api_key)
 router = Router(providers=[provider, gemini])
-cache = InMemoryCache(ttl_seconds=3600)
+cache = InMemoryCache(ttl_seconds=3600, fallback_ttl_seconds=300)
 
 @app.post("/v1/chat/completions")
 
